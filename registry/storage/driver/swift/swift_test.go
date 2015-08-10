@@ -76,6 +76,7 @@ func init() {
 			root,
 			insecureSkipVerify,
 			defaultChunkSize,
+			"",
 		}
 
 		return New(parameters)

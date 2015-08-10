@@ -20,6 +20,7 @@ package swift
 
 import (
 	"bytes"
+	"crypto/hmac"
 	"crypto/rand"
 	"crypto/sha1"
 	"crypto/tls"
@@ -29,6 +30,7 @@ import (
 	"io"
 	"io/ioutil"
 	"net/http"
+	"net/url"
 	gopath "path"
 	"strconv"
 	"strings"
@@ -66,9 +68,18 @@ type Parameters struct {
 	Prefix             string
 	InsecureSkipVerify bool
 	ChunkSize          int
+	SecretKey          string
 }
 
-type swiftInfo map[string]interface{}
+// swiftInfo maps the JSON structure returned by Swift /info endpoint
+type swiftInfo struct {
+	Swift struct {
+		Version   string `mapstructure:"version"`
+	}
+	Tempurl struct {
+		Methods []string `mapstructure:"methods"`
+	}
+}
 
 func init() {
 	factory.Register(driverName, &swiftDriverFactory{})
@@ -87,6 +98,8 @@ type driver struct {
 	Prefix            string
 	BulkDeleteSupport bool
 	ChunkSize         int
+	TempUrlKey        string
+	TempUrlMethods    map[string]bool
 }
 
 type baseEmbed struct {
@@ -173,8 +186,59 @@ func New(params Parameters) (*Driver, error) {
 		Conn:              ct,
 		Container:         params.Container,
 		Prefix:            params.Prefix,
-		BulkDeleteSupport: detectBulkDelete(params.AuthURL),
 		ChunkSize:         params.ChunkSize,
+		TempUrlMethods:    make(map[string]bool),
+	}
+
+	if config, err := discoverSwiftConfiguration(ct.StorageUrl); err == nil {
+		_, d.BulkDeleteSupport = config["bulk_delete"]
+
+		info := swiftInfo{}
+		if err := mapstructure.Decode(config, &info); err == nil {
+			for _, method := range info.Tempurl.Methods {
+				d.TempUrlMethods[method] = true
+			}
+
+			if len(info.Tempurl.Methods) > 0 {
+				secretKey := params.SecretKey
+				if secretKey == "" {
+					secretKey, _ = generateSecret()
+				}
+
+				// Since Swift 2.2.2, we can now set secret keys on containers
+				// in addition to the account secret keys. Use them in preference.
+				if info.Swift.Version >= "2.2.2"  {
+					_, containerHeaders, err := d.Conn.Container(d.Container)
+					if err != nil {
+						return nil, fmt.Errorf("Failed to fetch container info %s (%s)", d.Container, err)
+					}
+
+					d.TempUrlKey = containerHeaders["X-Container-Meta-Temp-Url-Key"]
+					if d.TempUrlKey == "" || (params.SecretKey != "" && d.TempUrlKey != params.SecretKey) {
+						m := swift.Metadata{}
+						m["temp-url-key"] = secretKey
+						if d.Conn.ContainerUpdate(d.Container, m.ContainerHeaders()); err == nil {
+							d.TempUrlKey = secretKey
+						}
+					}
+				} else {
+					// Use the account secret key
+					_, accountHeaders, err := d.Conn.Account()
+					if err != nil {
+						return nil, fmt.Errorf("Failed to fetch account info (%s)", err)
+					}
+
+					d.TempUrlKey = accountHeaders["X-Account-Meta-Temp-Url-Key"]
+					if d.TempUrlKey == "" || (params.SecretKey != "" && d.TempUrlKey != params.SecretKey) {
+						m := swift.Metadata{}
+						m["temp-url-key"] = secretKey
+						if err := d.Conn.AccountUpdate(m.AccountHeaders());  err == nil {
+							d.TempUrlKey = secretKey
+						}
+					}
+				}
+			}
+		}
 	}
 
 	return &Driver{
@@ -584,9 +648,30 @@ func (d *driver) Delete(ctx context.Context, path string) error {
 }
 
 // URLFor returns a URL which may be used to retrieve the content stored at the given path.
-// May return an UnsupportedMethodErr in certain StorageDriver implementations.
 func (d *driver) URLFor(ctx context.Context, path string, options map[string]interface{}) (string, error) {
-	return "", storagedriver.ErrUnsupportedMethod
+	if d.TempUrlKey == "" {
+		return "", storagedriver.ErrUnsupportedMethod
+	}
+
+	methodString := "GET"
+	method, ok := options["method"]
+	if ok {
+		if methodString, ok = method.(string); !ok {
+			return "", storagedriver.ErrUnsupportedMethod
+		}
+	}
+
+	if _, supported := d.TempUrlMethods[methodString]; !supported {
+		return "", storagedriver.ErrUnsupportedMethod
+	}
+
+	expiresTime := time.Now().Add(20 * time.Minute).Unix()
+	mac := hmac.New(sha1.New, []byte(d.TempUrlKey))
+	prefix, _ := url.Parse(d.Conn.StorageUrl)
+	body := fmt.Sprintf("%s\n%d\n%s/%s/%s", methodString, expiresTime, prefix.Path, d.Container, d.swiftPath(path))
+	mac.Write([]byte(body))
+	sig := hex.EncodeToString(mac.Sum(nil))
+	return fmt.Sprintf("%s/%s/%s?temp_url_sig=%s&temp_url_expires=%d", d.Conn.StorageUrl, d.Container, d.swiftPath(path), sig, expiresTime), nil
 }
 
 func (d *driver) swiftPath(path string) string {
@@ -634,17 +719,17 @@ func (d *driver) createManifest(path string, segments string) error {
 	return nil
 }
 
-func detectBulkDelete(authURL string) (bulkDelete bool) {
-	resp, err := http.Get(gopath.Join(authURL, "..", "..") + "/info")
+func discoverSwiftConfiguration(storageURL string) (infos map[string]interface{}, err error) {
+	infoUrl, _ := url.Parse(storageURL)
+	infoUrl.Path = gopath.Join(infoUrl.Path, "..", "..", "info")
+	resp, err := http.Get(infoUrl.String())
 	if err == nil {
 		defer resp.Body.Close()
 		decoder := json.NewDecoder(resp.Body)
-		var infos swiftInfo
-		if decoder.Decode(&infos) == nil {
-			_, bulkDelete = infos["bulk_delete"]
-		}
+		err = decoder.Decode(&infos)
+		return infos, err
 	}
-	return
+	return infos, err
 }
 
 func parseManifest(manifest string) (container string, prefix string) {
@@ -654,4 +739,12 @@ func parseManifest(manifest string) (container string, prefix string) {
 		prefix = components[1]
 	}
 	return container, prefix
+}
+
+func generateSecret() (string, error) {
+	var secretBytes [32]byte
+	if _, err := rand.Read(secretBytes[:]); err != nil {
+		return "", fmt.Errorf("could not generate random bytes for Swift secret key: %v", err)
+	}
+	return string(secretBytes[:]), nil
 }
