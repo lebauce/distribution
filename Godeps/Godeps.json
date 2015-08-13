@@ -96,7 +96,7 @@
 		},
 		{
 			"ImportPath": "github.com/ncw/swift",
-			"Rev": "22c8fa9fb5ba145b4d4e2cebb027e84b1a7b1296"
+			"Rev": "dcfbe11db7e9e8e005013cd00e4bca09e3cdbbb3"
 		},
 		{
 			"ImportPath": "github.com/yvasiyarov/go-metrics",
