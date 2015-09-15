@@ -14,6 +14,8 @@ import (
 	"github.com/docker/distribution"
 	"github.com/docker/distribution/configuration"
 	ctxu "github.com/docker/distribution/context"
+	"github.com/docker/distribution/health"
+	"github.com/docker/distribution/health/checks"
 	"github.com/docker/distribution/notifications"
 	"github.com/docker/distribution/registry/api/errcode"
 	"github.com/docker/distribution/registry/api/v2"
@@ -36,13 +38,16 @@ import (
 // was specified.
 const randomSecretSize = 32
 
+// defaultCheckInterval is the default time in between health checks
+const defaultCheckInterval = 10 * time.Second
+
 // App is a global registry application object. Shared resources can be placed
 // on this object that will be accessible from all requests. Any writable
 // fields should be protected.
 type App struct {
 	context.Context
 
-	Config configuration.Configuration
+	Config *configuration.Configuration
 
 	router           *mux.Router                 // main application router, configured with dispatchers
 	driver           storagedriver.StorageDriver // driver maintains the app global storage driver instance.
@@ -64,15 +69,13 @@ type App struct {
 // NewApp takes a configuration and returns a configured app, ready to serve
 // requests. The app only implements ServeHTTP and can be wrapped in other
 // handlers accordingly.
-func NewApp(ctx context.Context, configuration configuration.Configuration) *App {
+func NewApp(ctx context.Context, configuration *configuration.Configuration) *App {
 	app := &App{
 		Config:  configuration,
 		Context: ctx,
 		router:  v2.RouterWithPrefix(configuration.HTTP.Prefix),
 		isCache: configuration.Proxy.RemoteURL != "",
 	}
-
-	app.Context = ctxu.WithLogger(app.Context, ctxu.GetLogger(app, "instance.id"))
 
 	// Register the handler dispatchers.
 	app.register(v2.RouteNameBase, func(ctx *Context, r *http.Request) http.Handler {
@@ -112,18 +115,23 @@ func NewApp(ctx context.Context, configuration configuration.Configuration) *App
 		panic(err)
 	}
 
-	app.configureSecret(&configuration)
-	app.configureEvents(&configuration)
-	app.configureRedis(&configuration)
-	app.configureLogHook(&configuration)
+	app.configureSecret(configuration)
+	app.configureEvents(configuration)
+	app.configureRedis(configuration)
+	app.configureLogHook(configuration)
+
+	options := []storage.RegistryOption{}
+
+	if app.isCache {
+		options = append(options, storage.DisableDigestResumption)
+	}
 
 	// configure deletion
-	var deleteEnabled bool
 	if d, ok := configuration.Storage["delete"]; ok {
 		e, ok := d["enabled"]
 		if ok {
-			if deleteEnabled, ok = e.(bool); !ok {
-				deleteEnabled = false
+			if deleteEnabled, ok := e.(bool); ok && deleteEnabled {
+				options = append(options, storage.EnableDelete)
 			}
 		}
 	}
@@ -138,10 +146,11 @@ func NewApp(ctx context.Context, configuration configuration.Configuration) *App
 		default:
 			panic(fmt.Sprintf("invalid type for redirect config: %#v", redirectConfig))
 		}
-
-		if redirectDisabled {
-			ctxu.GetLogger(app).Infof("backend redirection disabled")
-		}
+	}
+	if redirectDisabled {
+		ctxu.GetLogger(app).Infof("backend redirection disabled")
+	} else {
+		options = append(options, storage.EnableRedirect)
 	}
 
 	// configure storage caches
@@ -157,10 +166,20 @@ func NewApp(ctx context.Context, configuration configuration.Configuration) *App
 			if app.redis == nil {
 				panic("redis configuration required to use for layerinfo cache")
 			}
-			app.registry = storage.NewRegistryWithDriver(app, app.driver, rediscache.NewRedisBlobDescriptorCacheProvider(app.redis), deleteEnabled, !redirectDisabled, app.isCache)
+			cacheProvider := rediscache.NewRedisBlobDescriptorCacheProvider(app.redis)
+			localOptions := append(options, storage.BlobDescriptorCacheProvider(cacheProvider))
+			app.registry, err = storage.NewRegistry(app, app.driver, localOptions...)
+			if err != nil {
+				panic("could not create registry: " + err.Error())
+			}
 			ctxu.GetLogger(app).Infof("using redis blob descriptor cache")
 		case "inmemory":
-			app.registry = storage.NewRegistryWithDriver(app, app.driver, memorycache.NewInMemoryBlobDescriptorCacheProvider(), deleteEnabled, !redirectDisabled, app.isCache)
+			cacheProvider := memorycache.NewInMemoryBlobDescriptorCacheProvider()
+			localOptions := append(options, storage.BlobDescriptorCacheProvider(cacheProvider))
+			app.registry, err = storage.NewRegistry(app, app.driver, localOptions...)
+			if err != nil {
+				panic("could not create registry: " + err.Error())
+			}
 			ctxu.GetLogger(app).Infof("using inmemory blob descriptor cache")
 		default:
 			if v != "" {
@@ -171,7 +190,10 @@ func NewApp(ctx context.Context, configuration configuration.Configuration) *App
 
 	if app.registry == nil {
 		// configure the registry if no cache section is available.
-		app.registry = storage.NewRegistryWithDriver(app.Context, app.driver, nil, deleteEnabled, !redirectDisabled, app.isCache)
+		app.registry, err = storage.NewRegistry(app.Context, app.driver, options...)
+		if err != nil {
+			panic("could not create registry: " + err.Error())
+		}
 	}
 
 	app.registry, err = applyRegistryMiddleware(app.Context, app.registry, configuration.Middleware["registry"])
@@ -201,6 +223,89 @@ func NewApp(ctx context.Context, configuration configuration.Configuration) *App
 	}
 
 	return app
+}
+
+// RegisterHealthChecks is an awful hack to defer health check registration
+// control to callers. This should only ever be called once per registry
+// process, typically in a main function. The correct way would be register
+// health checks outside of app, since multiple apps may exist in the same
+// process. Because the configuration and app are tightly coupled,
+// implementing this properly will require a refactor. This method may panic
+// if called twice in the same process.
+func (app *App) RegisterHealthChecks(healthRegistries ...*health.Registry) {
+	if len(healthRegistries) > 1 {
+		panic("RegisterHealthChecks called with more than one registry")
+	}
+	healthRegistry := health.DefaultRegistry
+	if len(healthRegistries) == 1 {
+		healthRegistry = healthRegistries[0]
+	}
+
+	if app.Config.Health.StorageDriver.Enabled {
+		interval := app.Config.Health.StorageDriver.Interval
+		if interval == 0 {
+			interval = defaultCheckInterval
+		}
+
+		storageDriverCheck := func() error {
+			_, err := app.driver.List(app, "/") // "/" should always exist
+			return err                          // any error will be treated as failure
+		}
+
+		if app.Config.Health.StorageDriver.Threshold != 0 {
+			healthRegistry.RegisterPeriodicThresholdFunc("storagedriver_"+app.Config.Storage.Type(), interval, app.Config.Health.StorageDriver.Threshold, storageDriverCheck)
+		} else {
+			healthRegistry.RegisterPeriodicFunc("storagedriver_"+app.Config.Storage.Type(), interval, storageDriverCheck)
+		}
+	}
+
+	for _, fileChecker := range app.Config.Health.FileCheckers {
+		interval := fileChecker.Interval
+		if interval == 0 {
+			interval = defaultCheckInterval
+		}
+		ctxu.GetLogger(app).Infof("configuring file health check path=%s, interval=%d", fileChecker.File, interval/time.Second)
+		healthRegistry.Register(fileChecker.File, health.PeriodicChecker(checks.FileChecker(fileChecker.File), interval))
+	}
+
+	for _, httpChecker := range app.Config.Health.HTTPCheckers {
+		interval := httpChecker.Interval
+		if interval == 0 {
+			interval = defaultCheckInterval
+		}
+
+		statusCode := httpChecker.StatusCode
+		if statusCode == 0 {
+			statusCode = 200
+		}
+
+		checker := checks.HTTPChecker(httpChecker.URI, statusCode, httpChecker.Timeout, httpChecker.Headers)
+
+		if httpChecker.Threshold != 0 {
+			ctxu.GetLogger(app).Infof("configuring HTTP health check uri=%s, interval=%d, threshold=%d", httpChecker.URI, interval/time.Second, httpChecker.Threshold)
+			healthRegistry.Register(httpChecker.URI, health.PeriodicThresholdChecker(checker, interval, httpChecker.Threshold))
+		} else {
+			ctxu.GetLogger(app).Infof("configuring HTTP health check uri=%s, interval=%d", httpChecker.URI, interval/time.Second)
+			healthRegistry.Register(httpChecker.URI, health.PeriodicChecker(checker, interval))
+		}
+	}
+
+	for _, tcpChecker := range app.Config.Health.TCPCheckers {
+		interval := tcpChecker.Interval
+		if interval == 0 {
+			interval = defaultCheckInterval
+		}
+
+		checker := checks.TCPChecker(tcpChecker.Addr, tcpChecker.Timeout)
+
+		if tcpChecker.Threshold != 0 {
+			ctxu.GetLogger(app).Infof("configuring TCP health check addr=%s, interval=%d, threshold=%d", tcpChecker.Addr, interval/time.Second, tcpChecker.Threshold)
+			healthRegistry.Register(tcpChecker.Addr, health.PeriodicThresholdChecker(checker, interval, tcpChecker.Threshold))
+		} else {
+			ctxu.GetLogger(app).Infof("configuring TCP health check addr=%s, interval=%d", tcpChecker.Addr, interval/time.Second)
+			healthRegistry.Register(tcpChecker.Addr, health.PeriodicChecker(checker, interval))
+		}
+	}
 }
 
 // register a handler with the application, by route name. The handler will be
@@ -428,6 +533,12 @@ type dispatchFunc func(ctx *Context, r *http.Request) http.Handler
 // handler, using the dispatch factory function.
 func (app *App) dispatcher(dispatch dispatchFunc) http.Handler {
 	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		for headerName, headerValues := range app.Config.HTTP.Headers {
+			for _, value := range headerValues {
+				w.Header().Add(headerName, value)
+			}
+		}
+
 		context := app.context(w, r)
 
 		if err := app.authorized(w, r, context); err != nil {
@@ -560,7 +671,7 @@ func (app *App) authorized(w http.ResponseWriter, r *http.Request, context *Cont
 			// base route is accessed. This section prevents us from making
 			// that mistake elsewhere in the code, allowing any operation to
 			// proceed.
-			if err := errcode.ServeJSON(w, v2.ErrorCodeUnauthorized); err != nil {
+			if err := errcode.ServeJSON(w, errcode.ErrorCodeUnauthorized); err != nil {
 				ctxu.GetLogger(context).Errorf("error serving error json: %v (from %v)", err, context.Errors)
 			}
 			return fmt.Errorf("forbidden: no repository name")
@@ -575,7 +686,7 @@ func (app *App) authorized(w http.ResponseWriter, r *http.Request, context *Cont
 			// Add the appropriate WWW-Auth header
 			err.SetHeaders(w)
 
-			if err := errcode.ServeJSON(w, v2.ErrorCodeUnauthorized.WithDetail(accessRecords)); err != nil {
+			if err := errcode.ServeJSON(w, errcode.ErrorCodeUnauthorized.WithDetail(accessRecords)); err != nil {
 				ctxu.GetLogger(context).Errorf("error serving error json: %v (from %v)", err, context.Errors)
 			}
 		default:

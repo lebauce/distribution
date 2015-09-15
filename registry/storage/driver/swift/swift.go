@@ -63,6 +63,7 @@ type Parameters struct {
 	TenantID           string
 	Domain             string
 	DomainID           string
+	TrustID            string
 	Region             string
 	Container          string
 	Prefix             string
@@ -169,6 +170,7 @@ func New(params Parameters) (*Driver, error) {
 		TenantId:       params.TenantID,
 		Domain:         params.Domain,
 		DomainId:       params.DomainID,
+		TrustId:        params.TrustID,
 		Transport:      transport,
 		ConnectTimeout: 60 * time.Second,
 		Timeout:        15 * 60 * time.Second,

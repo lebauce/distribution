@@ -20,8 +20,8 @@ import (
 	"github.com/docker/distribution/context"
 	"github.com/docker/distribution/digest"
 	"github.com/docker/distribution/manifest"
+	"github.com/docker/distribution/manifest/schema1"
 	"github.com/docker/distribution/registry/api/errcode"
-	"github.com/docker/distribution/registry/api/v2"
 	"github.com/docker/distribution/testutil"
 )
 
@@ -420,19 +420,19 @@ func TestBlobUploadMonolithic(t *testing.T) {
 	}
 }
 
-func newRandomSchemaV1Manifest(name, tag string, blobCount int) (*manifest.SignedManifest, digest.Digest) {
-	blobs := make([]manifest.FSLayer, blobCount)
-	history := make([]manifest.History, blobCount)
+func newRandomSchemaV1Manifest(name, tag string, blobCount int) (*schema1.SignedManifest, digest.Digest) {
+	blobs := make([]schema1.FSLayer, blobCount)
+	history := make([]schema1.History, blobCount)
 
 	for i := 0; i < blobCount; i++ {
 		dgst, blob := newRandomBlob((i % 5) * 16)
 
-		blobs[i] = manifest.FSLayer{BlobSum: dgst}
-		history[i] = manifest.History{V1Compatibility: fmt.Sprintf("{\"Hex\": \"%x\"}", blob)}
+		blobs[i] = schema1.FSLayer{BlobSum: dgst}
+		history[i] = schema1.History{V1Compatibility: fmt.Sprintf("{\"Hex\": \"%x\"}", blob)}
 	}
 
-	m := &manifest.SignedManifest{
-		Manifest: manifest.Manifest{
+	m := &schema1.SignedManifest{
+		Manifest: schema1.Manifest{
 			Name:         name,
 			Tag:          tag,
 			Architecture: "x86",
@@ -522,7 +522,7 @@ func addTestManifest(repo, reference string, content []byte, m *testutil.Request
 
 }
 
-func checkEqualManifest(m1, m2 *manifest.SignedManifest) error {
+func checkEqualManifest(m1, m2 *schema1.SignedManifest) error {
 	if m1.Name != m2.Name {
 		return fmt.Errorf("name does not match %q != %q", m1.Name, m2.Name)
 	}
@@ -782,10 +782,10 @@ func TestManifestUnauthorized(t *testing.T) {
 	if !ok {
 		t.Fatalf("Unexpected error type: %#v", err)
 	}
-	if v2Err.Code != v2.ErrorCodeUnauthorized {
+	if v2Err.Code != errcode.ErrorCodeUnauthorized {
 		t.Fatalf("Unexpected error code: %s", v2Err.Code.String())
 	}
-	if expected := v2.ErrorCodeUnauthorized.Message(); v2Err.Message != expected {
+	if expected := errcode.ErrorCodeUnauthorized.Message(); v2Err.Message != expected {
 		t.Fatalf("Unexpected message value: %q, expected %q", v2Err.Message, expected)
 	}
 }
@@ -855,5 +855,51 @@ func TestCatalogInParts(t *testing.T) {
 
 	if numFilled != 1 {
 		t.Fatalf("Got wrong number of repos")
+	}
+}
+
+func TestSanitizeLocation(t *testing.T) {
+	for _, testcase := range []struct {
+		description string
+		location    string
+		source      string
+		expected    string
+		err         error
+	}{
+		{
+			description: "ensure relative location correctly resolved",
+			location:    "/v2/foo/baasdf",
+			source:      "http://blahalaja.com/v1",
+			expected:    "http://blahalaja.com/v2/foo/baasdf",
+		},
+		{
+			description: "ensure parameters are preserved",
+			location:    "/v2/foo/baasdf?_state=asdfasfdasdfasdf&digest=foo",
+			source:      "http://blahalaja.com/v1",
+			expected:    "http://blahalaja.com/v2/foo/baasdf?_state=asdfasfdasdfasdf&digest=foo",
+		},
+		{
+			description: "ensure new hostname overidden",
+			location:    "https://mwhahaha.com/v2/foo/baasdf?_state=asdfasfdasdfasdf",
+			source:      "http://blahalaja.com/v1",
+			expected:    "https://mwhahaha.com/v2/foo/baasdf?_state=asdfasfdasdfasdf",
+		},
+	} {
+		fatalf := func(format string, args ...interface{}) {
+			t.Fatalf(testcase.description+": "+format, args...)
+		}
+
+		s, err := sanitizeLocation(testcase.location, testcase.source)
+		if err != testcase.err {
+			if testcase.err != nil {
+				fatalf("expected error: %v != %v", err, testcase)
+			} else {
+				fatalf("unexpected error sanitizing: %v", err)
+			}
+		}
+
+		if s != testcase.expected {
+			fatalf("bad sanitize: %q != %q", s, testcase.expected)
+		}
 	}
 }

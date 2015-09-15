@@ -1,23 +1,21 @@
 <!--[metadata]>
 +++
-title = "Configure a Registry"
-description = "Explains how to deploy a registry"
-keywords = ["registry, service, images,  repository"]
+title = "Configuring a registry"
+description = "Explains how to configure a registry"
+keywords = ["registry, on-prem, images, tags, repository, distribution, configuration"]
 [menu.main]
 parent="smn_registry"
 weight=4
 +++
 <![end-metadata]-->
 
-
-
 # Registry Configuration Reference
 
 The Registry configuration is based on a YAML file, detailed below. While it comes with sane default values out of the box, you are heavily encouraged to review it exhaustively before moving your systems to production.
 
-## Override configuration options
+## Override specific configuration options
 
-In a typical setup where you run your Registry from the official image, you can specify any configuration variable from the environment by passing `-e` arguments to your `docker run` stanza, or from within a Dockerfile using the `ENV` instruction.
+In a typical setup where you run your Registry from the official image, you can specify a configuration variable from the environment by passing `-e` arguments to your `docker run` stanza, or from within a Dockerfile using the `ENV` instruction.
 
 To override a configuration option, create an environment variable named
 `REGISTRY_variable` where *`variable`* is the name of the configuration option
@@ -35,13 +33,17 @@ To override this value, set an environment variable like this:
 This variable overrides the `/var/lib/registry` value to the `/somewhere`
 directory.
 
->**Note**: If an environment variable changes a map value into a string, such
->as replacing the storage driver type with `REGISTRY_STORAGE=filesystem`, then
->all sub-fields will be erased. As such, specifying the storage type in the
->environment will remove all parameters related to the old storage
->configuration.
+## Overriding the entire configuration file
 
+If the default configuration is not a sound basis for your usage, or if you are having issues overriding keys from the environment, you can specify an alternate YAML configuration file by mounting it as a volume in the container.
 
+Typically, create a new configuration file from scratch, and call it `config.yml`, then:
+
+    docker run -d -p 5000:5000 --restart=always --name registry \
+      -v `pwd`/config.yml:/etc/docker/registry/config.yml \
+      registry:2
+
+You can (and probably should) use [this as a starting point](https://github.com/docker/distribution/blob/master/cmd/registry/config-example.yml).
 
 ## List of configuration options
 
@@ -60,7 +62,7 @@ information about each option that appears later in this page.
         - type: mail
           disabled: true
           levels:
-          - panic
+            - panic
           options:
             smtp:
               addr: mail.example.com:25
@@ -68,7 +70,7 @@ information about each option that appears later in this page.
               password: password
               insecure: true
             from: sender@example.com
-            to: 
+            to:
               - errors@example.com
     loglevel: debug # deprecated: use "log"
     storage:
@@ -104,6 +106,8 @@ information about each option that appears later in this page.
         region: fr
         container: containername
         rootdirectory: /swift/object/name/prefix
+      delete:
+        enabled: false
       redirect:
         disable: false
       cache:
@@ -163,6 +167,8 @@ information about each option that appears later in this page.
           - /path/to/another/ca.pem
       debug:
         addr: localhost:5001
+      headers:
+        X-Content-Type-Options: [nosniff]
     notifications:
       endpoints:
         - name: alistener
@@ -183,13 +189,36 @@ information about each option that appears later in this page.
         maxidle: 16
         maxactive: 64
         idletimeout: 300s
+    health:
+      storagedriver:
+        enabled: true
+        interval: 10s
+        threshold: 3
+      file:
+        - file: /path/to/checked/file
+          interval: 10s
+      http:
+        - uri: http://server.to.check/must/return/200
+          headers:
+            Authorization: [Basic QWxhZGRpbjpvcGVuIHNlc2FtZQ==]
+          statuscode: 200
+          timeout: 3s
+          interval: 10s
+          threshold: 3
+      tcp:
+        - addr: redis-server.domain.com:6379
+          timeout: 3s
+          interval: 10s
+          threshold: 3
+    proxy:
+      remoteurl: https://registry-1.docker.io
+      username: [username]
+      password: [password]
 
 In some instances a configuration option is **optional** but it contains child
 options marked as **required**. This indicates that you can omit the parent with
 all its children. However, if the parent is included, you must also include all
 the children marked **required**.
-
-
 
 ## version
 
@@ -322,6 +351,8 @@ Permitted values are `error`, `warn`, `info` and `debug`. The default is
         region: fr
         container: containername
         rootdirectory: /swift/object/name/prefix
+      delete:
+        enabled: false
       cache:
         blobdescriptor: inmemory
       maintenance:
@@ -336,9 +367,18 @@ Permitted values are `error`, `warn`, `info` and `debug`. The default is
 The storage option is **required** and defines which storage backend is in use.
 You must configure one backend; if you configure more, the registry returns an error.
 
-If you are deploying a registry on Windows, be aware that a Windows volume mounted from the host is not recommended. Instead, you can use a S3, or Azure, backing data-store. If you do use a Windows volume, you must ensure that the `PATH` to the mount point is within Window's `MAX_PATH` limits. Failure to do so can result in the following error message: 
+If you are deploying a registry on Windows, be aware that a Windows volume mounted from the host is not recommended. Instead, you can use a S3, or Azure, backing data-store. If you do use a Windows volume, you must ensure that the `PATH` to the mount point is within Windows' `MAX_PATH` limits (typically 255 characters). Failure to do so can result in the following error message:
 
     mkdir /XXX protocol error and your registry will not function properly.
+
+### delete
+
+Use the `delete` subsection to enable the deletion of image blobs and manifests
+by digest. It defaults to false, but it can be enabled by writing the following
+on the configuration file:
+
+    delete:
+      enabled: true
 
 ### cache
 
@@ -366,8 +406,8 @@ doing aggressive caching.
 Redirects can be disabled by adding a single flag `disable`, set to `true`
 under the `redirect` section:
 
-  redirect:
-    disable: true
+    redirect:
+      disable: true
 
 ### filesystem
 
@@ -734,6 +774,17 @@ This storage backend uses Openstack Swift object storage.
   </tr>
   <tr>
     <td>
+      <code>trustid</code>
+    </td>
+    <td>
+      no
+    </td>
+    <td>
+      Your Openstack trust id for Identity v3 API.
+    </td>
+  </tr>
+  <tr>
+    <td>
       <code>insecureskipverify</code>
     </td>
     <td>
@@ -784,7 +835,7 @@ This storage backend uses Openstack Swift object storage.
         path: /path/to/htpasswd
 
 The `auth` option is **optional**. There are
-currently 2 possible auth providers, `silly` and `token`. You can configure only
+currently 3 possible auth providers, `silly`, `token` and `htpasswd`. You can configure only
 one `auth` provider.
 
 ### silly
@@ -1147,6 +1198,8 @@ configuration may contain both.
           - /path/to/another/ca.pem
       debug:
         addr: localhost:5001
+      headers:
+        X-Content-Type-Options: [nosniff]
 
 The `http` option details the configuration for the HTTP server that hosts the registry.
 
@@ -1275,6 +1328,21 @@ The `debug` section takes a single, required `addr` parameter. This parameter
 specifies the `HOST:PORT` on which the debug server should accept connections.
 
 
+### headers
+
+The `headers` option is **optional** . Use it to specify headers that the HTTP
+server should include in responses. This can be used for security headers such
+as `Strict-Transport-Security`.
+
+The `headers` option should contain an option for each header to include, where
+the parameter name is the header's name, and the parameter value a list of the
+header's payload values.
+
+Including `X-Content-Type-Options: [nosniff]` is recommended, so that browsers
+will not interpret content as HTML if they are directed to load a page from the
+registry. This header is included in the example configuration files.
+
+
 ## notifications
 
     notifications:
@@ -1341,7 +1409,9 @@ The URL to which events should be published.
       yes
     </td>
     <td>
-      Static headers to add to each request.
+      Static headers to add to each request. Each header's name should be a key
+      underneath headers, and each value is a list of payloads for that
+      header name. Note that values must always be lists.
     </td>
   </tr>
   <tr>
@@ -1420,6 +1490,9 @@ may use the Redis instance for several applications. The current purpose is
 caching information about immutable blobs. Most of the options below control
 how the registry connects to redis. You can control the pool's behavior
 with the [pool](#pool) subsection.
+
+It's advisable to configure Redis itself with the **allkeys-lru** eviction policy
+as the registry does not set an expire value on keys.
 
 <table>
   <tr>
@@ -1547,6 +1620,387 @@ Configure the behavior of the Redis connection pool.
     </td>
   </tr>
 </table>
+
+## health
+
+    health:
+      storagedriver:
+        enabled: true
+        interval: 10s
+        threshold: 3
+      file:
+        - file: /path/to/checked/file
+          interval: 10s
+      http:
+        - uri: http://server.to.check/must/return/200
+          headers:
+            Authorization: [Basic QWxhZGRpbjpvcGVuIHNlc2FtZQ==]
+          statuscode: 200
+          timeout: 3s
+          interval: 10s
+          threshold: 3
+      tcp:
+        - addr: redis-server.domain.com:6379
+          timeout: 3s
+          interval: 10s
+          threshold: 3
+
+The health option is **optional**. It may contain preferences for a periodic
+health check on the storage driver's backend storage, and optional periodic
+checks on local files, HTTP URIs, and/or TCP servers. The results of the health
+checks are available at /debug/health on the debug HTTP server if the debug
+HTTP server is enabled (see http section).
+
+### storagedriver
+
+storagedriver contains options for a health check on the configured storage
+driver's backend storage. enabled must be set to true for this health check to
+be active.
+
+<table>
+  <tr>
+    <th>Parameter</th>
+    <th>Required</th>
+    <th>Description</th>
+  </tr>
+  <tr>
+    <td>
+      <code>enabled</code>
+    </td>
+    <td>
+      yes
+    </td>
+    <td>
+"true" to enable the storage driver health check or "false" to disable it.
+</td>
+  </tr>
+  <tr>
+    <td>
+      <code>interval</code>
+    </td>
+    <td>
+      no
+    </td>
+    <td>
+      The length of time to wait between repetitions of the check. This field
+      takes a positive integer and an optional suffix indicating the unit of
+      time. Possible units are:
+      <ul>
+        <li><code>ns</code> (nanoseconds)</li>
+        <li><code>us</code> (microseconds)</li>
+        <li><code>ms</code> (milliseconds)</li>
+        <li><code>s</code> (seconds)</li>
+        <li><code>m</code> (minutes)</li>
+        <li><code>h</code> (hours)</li>
+      </ul>
+    If you omit the suffix, the system interprets the value as nanoseconds.
+    The default value is 10 seconds if this field is omitted.
+    </td>
+  </tr>
+  <tr>
+    <td>
+      <code>threshold</code>
+    </td>
+    <td>
+      no
+    </td>
+    <td>
+      An integer specifying the number of times the check must fail before the
+      check triggers an unhealthy state. If this filed is not specified, a
+      single failure will trigger an unhealthy state.
+    </td>
+  </tr>
+</table>
+
+### file
+
+file is a list of paths to be periodically checked for the existence of a file.
+If a file exists at the given path, the health check will fail. This can be
+used as a way of bringing a registry out of rotation by creating a file.
+
+<table>
+  <tr>
+    <th>Parameter</th>
+    <th>Required</th>
+    <th>Description</th>
+  </tr>
+  <tr>
+    <td>
+      <code>file</code>
+    </td>
+    <td>
+      yes
+    </td>
+    <td>
+The path to check for the existence of a file.
+</td>
+  </tr>
+  <tr>
+    <td>
+      <code>interval</code>
+    </td>
+    <td>
+      no
+    </td>
+    <td>
+      The length of time to wait between repetitions of the check. This field
+      takes a positive integer and an optional suffix indicating the unit of
+      time. Possible units are:
+      <ul>
+        <li><code>ns</code> (nanoseconds)</li>
+        <li><code>us</code> (microseconds)</li>
+        <li><code>ms</code> (milliseconds)</li>
+        <li><code>s</code> (seconds)</li>
+        <li><code>m</code> (minutes)</li>
+        <li><code>h</code> (hours)</li>
+      </ul>
+    If you omit the suffix, the system interprets the value as nanoseconds.
+    The default value is 10 seconds if this field is omitted.
+    </td>
+  </tr>
+</table>
+
+### http
+
+http is a list of HTTP URIs to be periodically checked with HEAD requests. If
+a HEAD request doesn't complete or returns an unexpected status code, the
+health check will fail.
+
+<table>
+  <tr>
+    <th>Parameter</th>
+    <th>Required</th>
+    <th>Description</th>
+  </tr>
+  <tr>
+    <td>
+      <code>uri</code>
+    </td>
+    <td>
+      yes
+    </td>
+    <td>
+The URI to check.
+</td>
+  </tr>
+   <tr>
+    <td>
+      <code>headers</code>
+    </td>
+    <td>
+      no
+    </td>
+    <td>
+      Static headers to add to each request. Each header's name should be a key
+      underneath headers, and each value is a list of payloads for that
+      header name. Note that values must always be lists.
+    </td>
+  </tr>
+  <tr>
+    <td>
+      <code>statuscode</code>
+    </td>
+    <td>
+      no
+    </td>
+    <td>
+Expected status code from the HTTP URI. Defaults to 200.
+</td>
+  </tr>
+  <tr>
+    <td>
+      <code>timeout</code>
+    </td>
+    <td>
+      no
+    </td>
+    <td>
+      The length of time to wait before timing out the HTTP request. This field
+      takes a positive integer and an optional suffix indicating the unit of
+      time. Possible units are:
+      <ul>
+        <li><code>ns</code> (nanoseconds)</li>
+        <li><code>us</code> (microseconds)</li>
+        <li><code>ms</code> (milliseconds)</li>
+        <li><code>s</code> (seconds)</li>
+        <li><code>m</code> (minutes)</li>
+        <li><code>h</code> (hours)</li>
+      </ul>
+    If you omit the suffix, the system interprets the value as nanoseconds.
+    </td>
+  </tr>
+  <tr>
+    <td>
+      <code>interval</code>
+    </td>
+    <td>
+      no
+    </td>
+    <td>
+      The length of time to wait between repetitions of the check. This field
+      takes a positive integer and an optional suffix indicating the unit of
+      time. Possible units are:
+      <ul>
+        <li><code>ns</code> (nanoseconds)</li>
+        <li><code>us</code> (microseconds)</li>
+        <li><code>ms</code> (milliseconds)</li>
+        <li><code>s</code> (seconds)</li>
+        <li><code>m</code> (minutes)</li>
+        <li><code>h</code> (hours)</li>
+      </ul>
+    If you omit the suffix, the system interprets the value as nanoseconds.
+    The default value is 10 seconds if this field is omitted.
+    </td>
+  </tr>
+  <tr>
+    <td>
+      <code>threshold</code>
+    </td>
+    <td>
+      no
+    </td>
+    <td>
+      An integer specifying the number of times the check must fail before the
+      check triggers an unhealthy state. If this filed is not specified, a
+      single failure will trigger an unhealthy state.
+    </td>
+  </tr>
+</table>
+
+### tcp
+
+tcp is a list of TCP addresses to be periodically checked with connection
+attempts. The addresses must include port numbers. If a connection attempt
+fails, the health check will fail.
+
+<table>
+  <tr>
+    <th>Parameter</th>
+    <th>Required</th>
+    <th>Description</th>
+  </tr>
+  <tr>
+    <td>
+      <code>addr</code>
+    </td>
+    <td>
+      yes
+    </td>
+    <td>
+The TCP address to connect to, including a port number.
+</td>
+  </tr>
+  <tr>
+    <td>
+      <code>timeout</code>
+    </td>
+    <td>
+      no
+    </td>
+    <td>
+      The length of time to wait before timing out the TCP connection. This
+      field takes a positive integer and an optional suffix indicating the unit
+      of time. Possible units are:
+      <ul>
+        <li><code>ns</code> (nanoseconds)</li>
+        <li><code>us</code> (microseconds)</li>
+        <li><code>ms</code> (milliseconds)</li>
+        <li><code>s</code> (seconds)</li>
+        <li><code>m</code> (minutes)</li>
+        <li><code>h</code> (hours)</li>
+      </ul>
+    If you omit the suffix, the system interprets the value as nanoseconds.
+    </td>
+  </tr>
+  <tr>
+    <td>
+      <code>interval</code>
+    </td>
+    <td>
+      no
+    </td>
+    <td>
+      The length of time to wait between repetitions of the check. This field
+      takes a positive integer and an optional suffix indicating the unit of
+      time. Possible units are:
+      <ul>
+        <li><code>ns</code> (nanoseconds)</li>
+        <li><code>us</code> (microseconds)</li>
+        <li><code>ms</code> (milliseconds)</li>
+        <li><code>s</code> (seconds)</li>
+        <li><code>m</code> (minutes)</li>
+        <li><code>h</code> (hours)</li>
+      </ul>
+    If you omit the suffix, the system interprets the value as nanoseconds.
+    The default value is 10 seconds if this field is omitted.
+    </td>
+  </tr>
+  <tr>
+    <td>
+      <code>threshold</code>
+    </td>
+    <td>
+      no
+    </td>
+    <td>
+      An integer specifying the number of times the check must fail before the
+      check triggers an unhealthy state. If this filed is not specified, a
+      single failure will trigger an unhealthy state.
+    </td>
+  </tr>
+</table>
+
+## Proxy
+
+    proxy:
+      remoteurl: https://registry-1.docker.io
+      username: [username]
+      password: [password]
+
+Proxy enables a registry to be configured as a pull through cache to the official Docker Hub.  See [mirror.md](mirror.md) for more information
+
+<table>
+  <tr>
+    <th>Parameter</th>
+    <th>Required</th>
+    <th>Description</th>
+  </tr>
+  <tr>
+    <td>
+      <code>remoteurl</code>
+    </td>
+    <td>
+      yes
+    </td>
+    <td>
+     The URL of the official Docker Hub
+    </td>
+  </tr>
+  <tr>
+    <td>
+      <code>username</code>
+    </td>
+    <td>
+      no
+    </td>
+    <td>
+     The username of the Docker Hub account
+    </td>
+  </tr>
+  <tr>
+    <td>
+      <code>password</code>
+    </td>
+    <td>
+      no
+    </td>
+    <td>
+     The password for the official Docker Hub account
+    </td>
+  </tr>
+</table>
+
+To enable pulling private repositories (e.g. `batman/robin`) a username and password for user `batman` must be specified.  Note: These private repositories will be stored in the proxy cache's storage and relevant measures should be taken to protect access to this.
 
 
 ## Example: Development configuration
