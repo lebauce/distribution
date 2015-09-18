@@ -7,9 +7,6 @@
 // It supports both TempAuth authentication and Keystone authentication
 // (up to version 3).
 //
-// Since Swift has no concept of directories (directories are an abstration),
-// empty objects are created with the MIME type application/vnd.swift.directory.
-//
 // As Swift has a limit on the size of a single uploaded object (by default
 // this is 5GB), the driver makes use of the Swift Large Object Support
 // (http://docs.openstack.org/developer/swift/overview_large_objects.html).

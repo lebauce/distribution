@@ -98,6 +98,16 @@ An implementation of the `storagedriver.StorageDriver` interface that uses [Open
 </tr>
 <tr>
     <td>
+    <code>trustid</code>
+    </td>
+    <td>
+    <p>
+    Optionally, your OpenStack trust id for Identity v3 API.
+    </p>
+    </td>
+</tr>
+<tr>
+    <td>
     <code>insecureskipverify</code>
     </td>
     <td>
@@ -133,6 +143,32 @@ An implementation of the `storagedriver.StorageDriver` interface that uses [Open
     <td>
     <p>
     Optionally, supply the root directory tree in which to store all registry files. Defaults to the empty string which is the container's root.</p>
+    </p>
+    </td>
+</tr>
+</table>
+
+The features supported by the Swift server are queried by requesting the `/info` URL on the server. In case the administrator
+disabled that feature, the configuration file can specify the following optional parameters :
+
+<table>
+<tr>
+    <td>
+    <code>tempurlcontainerkey</code>
+    </td>
+    <td>
+    <p>
+    Specify whether to use container secret key to generate temporary URL when set to true, or the account secret key otherwise.</p>
+    </p>
+    </td>
+</tr>
+<tr>
+    <td>
+    <code>tempurlmethods</code>
+    </td>
+    <td>
+    <p>
+    Array of HTTP methods that are supported by the TempURL middleware of the Swift server.</p>
     </p>
     </td>
 </tr>
