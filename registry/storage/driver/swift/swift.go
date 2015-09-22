@@ -66,6 +66,7 @@ type Parameters struct {
 	Prefix              string
 	InsecureSkipVerify  bool
 	ChunkSize           int
+	SecretID            string
 	SecretKey           string
 	TempURLContainerKey bool
 	TempURLMethods    []string
@@ -98,6 +99,8 @@ type driver struct {
 	Prefix              string
 	BulkDeleteSupport   bool
 	ChunkSize           int
+	TenantID            string
+	SecretID            string
 	SecretKey           string
 	TempUrlContainerKey bool
 	TempUrlMethods    []string
@@ -241,6 +244,12 @@ func New(params Parameters) (*Driver, error) {
 				if err := d.Conn.AccountUpdate(m.AccountHeaders());  err == nil {
 					d.SecretKey = secretKey
 				}
+			}
+			if (params.SecretID != "") {
+				d.SecretID = params.SecretID
+			}
+			if (params.TenantID != "") {
+				d.TenantID = params.TenantID
 			}
 		}
 	}
@@ -683,7 +692,13 @@ func (d *driver) URLFor(ctx context.Context, path string, options map[string]int
 	body := fmt.Sprintf("%s\n%d\n%s/%s/%s", methodString, expiresTime, prefix.Path, d.Container, d.swiftPath(path))
 	mac.Write([]byte(body))
 	sig := hex.EncodeToString(mac.Sum(nil))
-	return fmt.Sprintf("%s/%s/%s?temp_url_sig=%s&temp_url_expires=%d", d.Conn.StorageUrl, d.Container, d.swiftPath(path), sig, expiresTime), nil
+	returnurl := ""
+	if (d.TenantID != "" && d.SecretID != "") {
+	        returnurl = fmt.Sprintf("%s/%s/%s?temp_url_sig=%s:%s:%s&temp_url_expires=%d", d.Conn.StorageUrl, d.Container, d.swiftPath(path), d.TenantID, d.SecretID, sig, expiresTime)
+	} else {
+	        returnurl = fmt.Sprintf("%s/%s/%s?temp_url_sig=%s&temp_url_expires=%d", d.Conn.StorageUrl, d.Container, d.swiftPath(path), sig, expiresTime)
+	}
+	return returnurl, nil
 }
 
 func (d *driver) swiftPath(path string) string {
